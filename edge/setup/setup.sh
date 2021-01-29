@@ -17,9 +17,12 @@ RED='\033[0;31m'
 BLUE='\033[1;34m'
 NC='\033[0m' # No Color
 
+echo -e "\n${NC}Please provide a prefix for all names"
+read -p ">> " RES_NAME_PREFIX
+
 # script configuration
-BASE_URL='https://raw.githubusercontent.com/Azure/live-video-analytics/master/edge/setup' # location of remote files used by the script
-DEFAULT_REGION='centralus'
+BASE_URL='https://raw.githubusercontent.com/KeyserDSoze/live-video-analytics/master/edge/setup' # location of remote files used by the script
+DEFAULT_REGION='westeurope'
 ENV_FILE='edge-deployment/.env'
 APP_SETTINGS_FILE='appsettings.json'
 VM_CREDENTIALS_FILE='vm-edge-device-credentials.txt'
@@ -30,16 +33,15 @@ DEPLOYMENT_MANIFEST_URL="$BASE_URL/deployment.template.json"
 DEPLOYMENT_MANIFEST_FILE='edge-deployment/deployment.amd64.json'
 ROLE_DEFINITION_URL="$BASE_URL/LVAEdgeUserRoleDefinition.json"
 ROLE_DEFINITION_FILE='role_definition.json'
-RESOURCE_GROUP='lva-sample-resources'
-IOT_EDGE_VM_NAME='lva-sample-iot-edge-device'
-IOT_EDGE_VM_ADMIN='lvaadmin'
-IOT_EDGE_VM_PWD="Password@$(shuf -i 1000-9999 -n 1)"
-CLOUD_SHELL_FOLDER="$HOME/clouddrive/lva-sample"
+RESOURCE_GROUP="$RES_NAME_PREFIX-lva-rg"
+IOT_EDGE_VM_NAME="$RES_NAME_PREFIX-lva-iot-edge-device"
+IOT_EDGE_VM_ADMIN='lvaadmin' # this is used later to build the INPUT_VIDEO_FOLDER_ON_DEVICE 
+CLOUD_SHELL_FOLDER="$HOME/clouddrive/lva-$RES_NAME_PREFIX"
 APPDATA_FOLDER_ON_DEVICE="/var/lib/azuremediaservices"
 
 checkForError() {
     if [ $? -ne 0 ]; then
-        echo -e "\n${RED}Something went wrong:${NC}
+        echo -e "\n${RED}Houston, we have a problem:${NC}
     Please read any error messages carefully.
     After addressing any errors, you can safely run this script again.
     Note:
@@ -147,6 +149,21 @@ if ! $EXISTING; then
     checkForError
 fi
 
+# 
+echo -e "\n${GREEN}Please specify a good password for your VM.${NC} (min 8 chars)"
+echo -e "${NC}Press ENTER to generate one automatically.${NC}"
+read -p ">> " IOT_EDGE_VM_PWD
+if [ -z "$IOT_EDGE_VM_PWD" ] || [ ${#IOT_EDGE_VM_PWD} -lt 8 ]
+then
+      IOT_EDGE_VM_PWD=$(date +%s | sha256sum | base64 | head -c 16 ; echo)
+fi 
+
+echo -e "your password will be ${BLUE}${IOT_EDGE_VM_PWD}${NC}."
+
+# create parameter json file needed for deploying the template
+PARAMS_FILENAME=$RES_NAME_PREFIX"_parameters.json"
+jq -n --arg nameval "$RES_NAME_PREFIX" '{namePrefix: {value: $nameval} }' > $PARAMS_FILENAME
+
 # deploy resources using a template
 echo -e "
 Now we'll deploy some resources to ${GREEN}${RESOURCE_GROUP}.${NC}
@@ -155,7 +172,7 @@ This typically takes about 6 minutes, but the time may vary.
 The resources are defined in a template here:
 ${BLUE}${ARM_TEMPLATE_URL}${NC}"
 
-ROLE_DEFINITION_NAME=$(az deployment group create --resource-group $RESOURCE_GROUP --template-uri $ARM_TEMPLATE_URL --query properties.outputs.roleName.value | tr -d \")
+ROLE_DEFINITION_NAME=$(az deployment group create --resource-group $RESOURCE_GROUP --template-uri $ARM_TEMPLATE_URL --parameters @$PARAMS_FILENAME --query properties.outputs.roleName.value | tr -d \")
 checkForError
 
 # query the resource group to see what has been deployed
@@ -168,7 +185,8 @@ echo "${RESOURCES}"
 IOTHUB=$(echo "${RESOURCES}" | awk '$2 ~ /Microsoft.Devices\/IotHubs$/ {print $1}')
 AMS_ACCOUNT=$(echo "${RESOURCES}" | awk '$2 ~ /Microsoft.Media\/mediaservices$/ {print $1}')
 VNET=$(echo "${RESOURCES}" | awk '$2 ~ /Microsoft.Network\/virtualNetworks$/ {print $1}')
-EDGE_DEVICE="lva-sample-device"
+PIP=$(echo "${RESOURCES}" | awk '$2 ~ /Microsoft.Network\/publicIPAddresses$/ {print $1}')
+EDGE_DEVICE="lva-$RES_NAME_PREFIX-device"
 IOTHUB_CONNECTION_STRING=$(az iot hub connection-string show --hub-name ${IOTHUB} --query='connectionString')
 CONTAINER_REGISTRY=$(echo "${RESOURCES}" | awk '$2 ~ /Microsoft.ContainerRegistry\/registries$/ {print $1}')
 CONTAINER_REGISTRY_USERNAME=$(az acr credential show -n $CONTAINER_REGISTRY --query 'username' | tr -d \")
@@ -213,26 +231,25 @@ re="SubscriptionId:\s([0-9a-z\-]*)"
 SUBSCRIPTION_ID=$([[ "$AMS_CONNECTION" =~ $re ]] && echo ${BASH_REMATCH[1]})
 
 # create new role definition in the subscription
-# if test -z "$(az role definition list -n "$ROLE_DEFINITION_NAME" | grep "roleName")"; then
-#    echo -e "Creating a custom role named ${BLUE}$ROLE_DEFINITION_NAME${NC}."
-#    curl -sL $ROLE_DEFINITION_URL > $ROLE_DEFINITION_FILE
-#    sed -i "s/\$SUBSCRIPTION_ID/$SUBSCRIPTION_ID/" $ROLE_DEFINITION_FILE
-#    sed -i "s/\$ROLE_DEFINITION_NAME/$ROLE_DEFINITION_NAME/" $ROLE_DEFINITION_FILE
+if test -z "$(az role definition list -n "$ROLE_DEFINITION_NAME" | grep "roleName")"; then
+    echo -e "Creating a custom role named ${BLUE}$ROLE_DEFINITION_NAME${NC}."
+    curl -sL $ROLE_DEFINITION_URL > $ROLE_DEFINITION_FILE
+    sed -i "s/\$SUBSCRIPTION_ID/$SUBSCRIPTION_ID/" $ROLE_DEFINITION_FILE
+    sed -i "s/\$ROLE_DEFINITION_NAME/$ROLE_DEFINITION_NAME/" $ROLE_DEFINITION_FILE
     
-#    az role definition create --role-definition $ROLE_DEFINITION_FILE -o none
-#    checkForError
-# fi
+    az role definition create --role-definition $ROLE_DEFINITION_FILE -o none
+   checkForError
+fi
 
 # capture object_id
 OBJECT_ID=$(az ad sp show --id ${AAD_SERVICE_PRINCIPAL_ID} --query 'objectId' | tr -d \")
 
 # create role assignment
-# az role assignment create --role "$ROLE_DEFINITION_NAME" --assignee-object-id $OBJECT_ID -o none
-# echo -e "The service principal with object id ${OBJECT_ID} is now linked with custom role ${BLUE}$ROLE_DEFINITION_NAME${NC}."
+az role assignment create --role "$ROLE_DEFINITION_NAME" --assignee-object-id $OBJECT_ID -o none
+echo -e "The service principal with object id ${OBJECT_ID} is now linked with custom role ${BLUE}$ROLE_DEFINITION_NAME${NC}."
 
 # The brand-new AMS account has a standard streaming endpoint in stopped state. 
-# A Premium streaming endpoint is recommended when recording multiple days worth of video
-
+# A Premium streaming endpoint is recommended when recording multiple daysÃ¢â‚¬â„¢ worth of video
 echo -e "
 Updating the Media Services account to use one ${YELLOW}Premium${NC} streaming endpoint."
 az ams streaming-endpoint scale --resource-group $RESOURCE_GROUP --account-name $AMS_ACCOUNT -n default --scale-units 1
@@ -265,9 +282,9 @@ Finally, we'll deploy a VM that will act as your IoT Edge device for using the L
     --vnet-name $VNET \
     --subnet 'default' \
     --custom-data $CLOUD_INIT_FILE \
-    --public-ip-address "" \
+    --public-ip-address $PIP \
     --size "Standard_DS3_v2" \
-    --tags sample=lva \
+    --tags product=lva \
     --output none
 
     checkForError
@@ -336,6 +353,9 @@ sed -i "s/\$AAD_SERVICE_PRINCIPAL_ID/$AAD_SERVICE_PRINCIPAL_ID/" $DEPLOYMENT_MAN
 sed -i "s/\$AAD_SERVICE_PRINCIPAL_SECRET/$AAD_SERVICE_PRINCIPAL_SECRET/" $DEPLOYMENT_MANIFEST_FILE
 sed -i "s/\$OUTPUT_VIDEO_FOLDER_ON_DEVICE/\/var\/media/" $DEPLOYMENT_MANIFEST_FILE
 sed -i "s/\$APPDATA_FOLDER_ON_DEVICE/${APPDATA_FOLDER_ON_DEVICE//\//\\/}/" $DEPLOYMENT_MANIFEST_FILE
+
+# deploy lvaEdge module
+az iot edge set-modules --device-id $EDGE_DEVICE --hub-name $IOTHUB --content $DEPLOYMENT_MANIFEST_FILE
 
 echo -e "
 The appsettings.json file is for the .NET Core sample application.
