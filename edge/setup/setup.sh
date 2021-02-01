@@ -21,7 +21,7 @@ echo -e "\n${NC}Please provide a prefix for all names"
 read -p ">> " RES_NAME_PREFIX
 
 # script configuration
-BASE_URL='https://raw.githubusercontent.com/KeyserDSoze/live-video-analytics/master/edge/setup' # location of remote files used by the script
+BASE_URL='https://raw.githubusercontent.com/ecstrim/live-video-analytics/master/edge/setup' # location of remote files used by the script
 DEFAULT_REGION='westeurope'
 ENV_FILE='edge-deployment/.env'
 APP_SETTINGS_FILE='appsettings.json'
@@ -354,8 +354,12 @@ sed -i "s/\$AAD_SERVICE_PRINCIPAL_SECRET/$AAD_SERVICE_PRINCIPAL_SECRET/" $DEPLOY
 sed -i "s/\$OUTPUT_VIDEO_FOLDER_ON_DEVICE/\/var\/media/" $DEPLOYMENT_MANIFEST_FILE
 sed -i "s/\$APPDATA_FOLDER_ON_DEVICE/${APPDATA_FOLDER_ON_DEVICE//\//\\/}/" $DEPLOYMENT_MANIFEST_FILE
 
+
+#
 # deploy lvaEdge module
 az iot edge set-modules --device-id $EDGE_DEVICE --hub-name $IOTHUB --content $DEPLOYMENT_MANIFEST_FILE
+
+
 
 echo -e "
 The appsettings.json file is for the .NET Core sample application.
